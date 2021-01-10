@@ -5,46 +5,10 @@ import sys, os
 import uuid
 import argparse
 import json
+import time
 
 SITO_ROOT = '/Users/jerry/work/git/sito'
 SAFE = os.path.join(SITO_ROOT, '.safe')
-
-def speech_recognition_yitu(session_key, audio):
-  # DOC: https://speech.yitutech.com/devdoc/shortaudio
-  import hmac, base64, hashlib
-  import time
-  import requests
-
-  ASR_URL = 'http://asr-prod.yitutech.com/v2/asr'
-  AUDIO_AUE = 'pcm'  # "pcm" for .wav files
-  SCENE = 0   # default
-  LANG = 1    # default
-
-  with open(os.path.join(SAFE, 'yitu', 'DEV_ID'), 'r') as f:
-      DEV_ID = f.readline().strip()
-
-  with open(os.path.join(SAFE, 'yitu', 'DEV_KEY'), 'r') as f:
-      DEV_KEY = f.readline().strip()
-
-  # request header
-  time_stamp = str(int(time.time()))
-  sign = hmac.new(DEV_KEY.encode(), (str(DEV_ID) + time_stamp).encode(), digestmod=hashlib.sha256).hexdigest()
-  headers = {'x-dev-id': str(DEV_ID), 'x-request-send-timestamp': time_stamp, 'x-signature': sign}
-
-  # request body
-  useCustomWordsIds = [] # hints
-  audio_data = base64.b64encode(audio.read()).decode()
-  body = {'audioBase64': audio_data, 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
-
-  # send request & get result
-  r = requests.post(ASR_URL, json=body, headers=headers)
-
-  # logging and return result
-  print(F'key={session_key}', F'service=YITU', r.json(), file=sys.stderr)
-  if r.status_code == 200:
-    return r.json()['resultText']
-  else:
-    return ''
 
 def speech_recognition_aliyun(session_key, audio):
   # DOC: https://help.aliyun.com/document_detail/72153.html
@@ -106,16 +70,117 @@ def speech_recognition_aliyun(session_key, audio):
   else:
     return ''
 
+
+def speech_recognition_baidu(session_key, audio):
+  # DOC: https://github.com/Baidu-AIP/speech-demo/rest-api-asr/python/asr_raw.py
+  from urllib.request import urlopen
+  from urllib.request import Request
+  from urllib.error import URLError
+  from urllib.parse import urlencode
+
+  # authentication
+  with open(os.path.join(SAFE, 'baidu_pro', 'API_KEY'), 'r') as f:
+      API_KEY = f.readline().strip()
+  with open(os.path.join(SAFE, 'baidu_pro', 'SECRET_KEY'), 'r') as f:
+      SECRET_KEY = f.readline().strip()
+
+  # get API certificate token
+  TOKEN_URL = 'http://openapi.baidu.com/oauth/2.0/token'
+  token_params = {'grant_type': 'client_credentials', 'client_id': API_KEY, 'client_secret': SECRET_KEY}
+  req = Request(TOKEN_URL, urlencode(token_params).encode('utf-8'))
+  r = json.loads(urlopen(req).read().decode())
+  #print(r, file=sys.stderr)
+  token = r['access_token']
+
+  ## 普通版
+  ## 1537 表示识别普通话，使用输入法模型。
+  ## 1536表示识别普通话，使用搜索模型。
+  ## 根据文档填写PID，选择语言及识别模型
+  #DEV_PID = 1537;
+  #ASR_URL = 'http://vop.baidu.com/server_api'
+  #SCOPE = 'audio_voice_assistant_get'  # 有此scope表示有asr能力，没有请在网页里勾选，非常旧的应用可能没有
+
+  #测试自训练平台需要打开以下信息， 自训练平台模型上线后，您会看见 第二步：“”获取专属模型参数pid:8001，modelid:1234”，按照这个信息获取 dev_pid=8001，lm_id=1234
+  # DEV_PID = 8001 ;
+  # LM_ID = 1234 ;
+
+  # 极速版 打开注释的话请填写自己申请的appkey appSecret ，并在网页中开通极速版（开通后可能会收费）
+  DEV_PID = 80001
+  ASR_URL = 'http://vop.baidu.com/pro_api'
+  #SCOPE = 'brain_enhanced_asr'  # 有此scope表示有asr能力，没有请在网页里勾选，非常旧的应用可能没有
+
+  CUID = '123456PYTHON'
+  FORMAT = 'wav'
+  SAMPLE_RATE = 16000
+
+  # send request & get response
+  params = {'cuid': CUID, 'token': token, 'dev_pid': DEV_PID}
+  #测试自训练平台需要打开以下信息
+  #params = {'cuid': CUID, 'token': token, 'dev_pid': DEV_PID, 'lm_id' : LM_ID}
+  audio_data = audio.read()
+  assert(len(audio_data) != 0)
+  header = {
+      'Content-Type': 'audio/' + FORMAT + '; rate=' + str(SAMPLE_RATE),
+      'Content-Length': len(audio_data)
+  }
+  req = Request(ASR_URL + "?" + urlencode(params), audio_data, header)
+  r = json.loads(urlopen(req).read())
+
+  # logging and return result
+  print(F'key={session_key}', F'service=BAIDU_PRO', r, file=sys.stderr)
+  if r['err_no'] == 0:
+    return r['result'][0].strip() # use 1-best result
+  else:
+    return ''
+
+
+def speech_recognition_yitu(session_key, audio):
+  # DOC: https://speech.yitutech.com/devdoc/shortaudio
+  import hmac, base64, hashlib
+  import requests
+
+  ASR_URL = 'http://asr-prod.yitutech.com/v2/asr'
+  AUDIO_AUE = 'pcm'  # "pcm" for .wav files
+  SCENE = 0   # default
+  LANG = 1    # default
+
+  with open(os.path.join(SAFE, 'yitu', 'DEV_ID'), 'r') as f:
+      DEV_ID = f.readline().strip()
+
+  with open(os.path.join(SAFE, 'yitu', 'DEV_KEY'), 'r') as f:
+      DEV_KEY = f.readline().strip()
+
+  # request header
+  time_stamp = str(int(time.time()))
+  sign = hmac.new(DEV_KEY.encode(), (str(DEV_ID) + time_stamp).encode(), digestmod=hashlib.sha256).hexdigest()
+  headers = {'x-dev-id': str(DEV_ID), 'x-request-send-timestamp': time_stamp, 'x-signature': sign}
+
+  # request body
+  useCustomWordsIds = [] # hints
+  audio_data = base64.b64encode(audio.read()).decode()
+  body = {'audioBase64': audio_data, 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
+
+  # send request & get result
+  r = requests.post(ASR_URL, json=body, headers=headers)
+
+  # logging and return result
+  print(F'key={session_key}', F'service=YITU', r.json(), file=sys.stderr)
+  if r.status_code == 200:
+    return r.json()['resultText']
+  else:
+    return ''
+
 def sito(service, session_key, audio):
   speech_recognition = {
-    'YITU': speech_recognition_yitu,
     'ALIYUN': speech_recognition_aliyun,
+    'BAIDU_PRO': speech_recognition_baidu,
+    'YITU': speech_recognition_yitu,
   }
   return speech_recognition[service](session_key, audio)
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--service', type=str, choices = ['ALIYUN', 'YITU'], default='YITU', help='speech recognition engine.')
+  parser.add_argument('--service', type=str, choices = ['ALIYUN', 'BAIDU_PRO', 'YITU'], default='YITU', help='speech recognition engine.')
   parser.add_argument('--key', type=str, default='', help='session key, if not specified, uuid.uuid1() will be used.')
   parser.add_argument('--audio', type=str, default='', help='audio file, if not specified, stdin will be used.')
   args = parser.parse_args()
