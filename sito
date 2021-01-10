@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# coding = utf8
+
+import sys, os
+import uuid
+import argparse
+import json
+
+SITO_ROOT = '/Users/jerry/work/git/sito'
+SAFE = os.path.join(SITO_ROOT, '.safe')
+
+def speech_recognition_yitu(session_key, audio):
+  # DOC: https://speech.yitutech.com/devdoc/shortaudio
+  import hmac, base64, hashlib
+  import time
+  import requests
+
+  ASR_URL = 'http://asr-prod.yitutech.com/v2/asr'
+  AUDIO_AUE = 'pcm'  # "pcm" for .wav files
+  SCENE = 0   # default
+  LANG = 1    # default
+
+  with open(os.path.join(SAFE, 'yitu', 'DEV_ID'), 'r') as f:
+      DEV_ID = f.readline().strip()
+
+  with open(os.path.join(SAFE, 'yitu', 'DEV_KEY'), 'r') as f:
+      DEV_KEY = f.readline().strip()
+
+  # request header
+  time_stamp = str(int(time.time()))
+  sign = hmac.new(DEV_KEY.encode(), (str(DEV_ID) + time_stamp).encode(), digestmod=hashlib.sha256).hexdigest()
+  headers = {'x-dev-id': str(DEV_ID), 'x-request-send-timestamp': time_stamp, 'x-signature': sign}
+
+  # request body
+  useCustomWordsIds = [] # hints
+  audio_data = base64.b64encode(audio.read()).decode()
+  body = {'audioBase64': audio_data, 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
+
+  # send request & get result
+  r = requests.post(ASR_URL, json=body, headers=headers)
+
+  # logging and return result
+  print(F'key={session_key}', F'service=YITU', r.json(), file=sys.stderr)
+  if r.status_code == 200:
+    return r.json()['resultText']
+  else:
+    return ''
+
+def speech_recognition_aliyun(session_key, audio):
+  # DOC: https://help.aliyun.com/document_detail/72153.html
+  import http.client
+  from aliyunsdkcore.client import AcsClient
+  from aliyunsdkcore.request import CommonRequest
+
+  with open(os.path.join(SAFE, 'aliyun', 'ACCESS_KEY_ID'), 'r') as f:
+      ACCESS_KEY_ID = f.readline().strip()
+
+  with open(os.path.join(SAFE, 'aliyun', 'ACCESS_KEY_SECRET'), 'r')  as f:
+      ACCESS_KEY_SECRET = f.readline().strip()
+
+  with open(os.path.join(SAFE, 'aliyun', 'APPKEY'), 'r') as f:
+      APPKEY = f.readline().strip()
+
+  # Get API certificate token
+  client = AcsClient(ACCESS_KEY_ID, ACCESS_KEY_SECRET, "cn-shanghai")
+  request = CommonRequest()
+  request.set_method('POST')
+  request.set_domain('nls-meta.cn-shanghai.aliyuncs.com')
+  request.set_version('2019-02-28')
+  request.set_action_name('CreateToken')
+  response = json.loads(client.do_action_with_exception(request))
+  token = response['Token']['Id']
+  #print(token, file=sys.stderr)
+
+  FORMAT = 'wav'
+  SAMPLE_RATE = 16000
+  enable_punctuation_prediction = 'true'
+  enable_inverse_text_normalization = 'true'
+  enable_voice_detection = 'false'
+
+  # Setup request URL
+  URL = ''.join(['http://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/asr', '?appkey=' + APPKEY, '&format=' + FORMAT, '&sample_rate=' + str(SAMPLE_RATE)])
+  URL += '&enable_punctuation_prediction=' + enable_punctuation_prediction
+  URL += '&enable_inverse_text_normalization=' + enable_inverse_text_normalization
+  URL += '&enable_voice_detection=' + enable_voice_detection
+  #print(URL)
+
+  # Setup request header
+  audio_data = audio.read()
+  header = {
+    'X-NLS-Token': token,
+    'Content-type': 'application/octet-stream',
+    'Content-Length': len(audio_data)
+  }
+
+  # send request & get response
+  host = 'nls-gateway.cn-shanghai.aliyuncs.com'
+  c = http.client.HTTPConnection(host)
+  c.request(method='POST', url=URL, body=audio_data, headers=header)
+  r = json.loads(c.getresponse().read())
+
+  # logging and return result
+  print(F'key={session_key}', F'service=ALIYUN', r, file=sys.stderr)
+  if r['status'] == 20000000 and r['message'] == 'SUCCESS':
+    return r['result']
+  else:
+    return ''
+
+def sito(service, session_key, audio):
+  speech_recognition = {
+    'YITU': speech_recognition_yitu,
+    'ALIYUN': speech_recognition_aliyun,
+  }
+  return speech_recognition[service](session_key, audio)
+
+if __name__ == '__main__':
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--service', type=str, choices = ['ALIYUN', 'YITU'], default='YITU', help='speech recognition engine.')
+  parser.add_argument('--key', type=str, default='', help='session key, if not specified, uuid.uuid1() will be used.')
+  parser.add_argument('--audio', type=str, default='', help='audio file, if not specified, stdin will be used.')
+  args = parser.parse_args()
+
+  session_key = args.key if args.key else uuid.uuid1()
+  audio = open(args.audio, mode = 'rb') if args.audio else sys.stdin.buffer
+
+  r = sito(args.service, session_key, audio)
+  print(session_key, r, file=sys.stdout)
