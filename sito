@@ -134,6 +134,29 @@ def speech_recognition_baidu(session_key, audio):
     return ''
 
 
+def speech_recognition_google(session_key, audio):
+  # DOC: https://cloud.google.com/speech-to-text/
+  # DEMO: https://github.com/googleapis/python-speech/blob/master/samples/snippets/transcribe.py
+  os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = os.path.join(SAFE, 'google', 'TIOBE.json')
+  from google.cloud import speech
+
+  config = speech.RecognitionConfig(
+      language_code="zh",
+      sample_rate_hertz=16000,
+      encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+  )
+  content = audio.read()
+  audio_data = speech.RecognitionAudio(content=content)
+
+  client = speech.SpeechClient()
+  r = client.recognize(config=config, audio=audio_data)
+
+  text = ''
+  for result in r.results:
+      text += result.alternatives[0].transcript
+  return text
+
+
 def speech_recognition_yitu(session_key, audio):
   # DOC: https://speech.yitutech.com/devdoc/shortaudio
   import hmac, base64, hashlib
@@ -174,13 +197,14 @@ def sito(service, session_key, audio):
   speech_recognition = {
     'ALIYUN': speech_recognition_aliyun,
     'BAIDU_PRO': speech_recognition_baidu,
+    'GOOGLE': speech_recognition_google,
     'YITU': speech_recognition_yitu,
   }
   return speech_recognition[service](session_key, audio)
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--service', type=str, choices = ['ALIYUN', 'BAIDU_PRO', 'YITU'], default='YITU', help='speech recognition engine.')
+  parser.add_argument('--service', type=str, choices = ['ALIYUN', 'BAIDU_PRO', 'GOOGLE', 'YITU'], default='YITU', help='speech recognition engine.')
   parser.add_argument('--key', type=str, default='', help='session key, if not specified, uuid.uuid1() will be used.')
   parser.add_argument('--audio', type=str, default='', help='audio file, if not specified, stdin will be used.')
   args = parser.parse_args()
