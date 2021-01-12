@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # coding = utf8
+# Copyright 2021  Author:  Jiayu DU  (SpeechIO)
 
 import sys, os
 import uuid
 import argparse
 import json
 import time
+import ffmpeg
 
 SITO_ROOT = '/Users/jerry/work/git/sito'
 SAFE = os.path.join(SITO_ROOT, '.safe')
@@ -143,14 +145,9 @@ def speech_recognition_google(session_key, audio_data):
       sample_rate_hertz=16000,
       encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
   )
-
   client = speech.SpeechClient()
   r = client.recognize(config=config, audio=speech.RecognitionAudio(content=audio_data))
-
-  text = ''
-  for result in r.results:
-      text += result.alternatives[0].transcript
-  return text
+  return ''.join([r.alternatives[0].transcript for result in r.results])
 
 
 def speech_recognition_yitu(session_key, audio_data):
@@ -176,7 +173,9 @@ def speech_recognition_yitu(session_key, audio_data):
 
   # request body
   useCustomWordsIds = [] # hints
-  body = {'audioBase64': base64.b64encode(audio_data).decode(), 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
+  #body = {'audioBase64': base64.b64encode(audio_data).decode('utf-8'), 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
+  audio_data_base64 = base64.b64encode(audio_data).decode('utf-8')
+  body = {'audioBase64': audio_data_base64, 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
 
   # send request & get result
   r = requests.post(ASR_URL, json=body, headers=headers)
@@ -197,6 +196,20 @@ def sito(service, session_key, audio_data):
   }
   return speech_recognition[service](session_key, audio_data)
 
+
+def read_and_convert_audio_data(in_filename, **input_kwargs):
+  try:
+    out, err = (ffmpeg
+      .input(in_filename, **input_kwargs)
+      .output('-', format='wav', acodec='pcm_s16le', ac=1, ar='16k')
+      .overwrite_output()
+      .run(capture_stdout=True, capture_stderr=True)
+    )
+  except ffmpeg.Error as e:
+    print(e.stderr, file=sys.stderr)
+    sys.exit(1)
+  return out
+
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--service', type=str, choices = ['ALIYUN', 'BAIDU_PRO', 'GOOGLE', 'YITU'], default='YITU', help='speech recognition engine.')
@@ -205,7 +218,13 @@ if __name__ == '__main__':
   args = parser.parse_args()
 
   session_id = args.id if args.id else uuid.uuid1()
-  audio = open(args.audio, mode = 'rb') if args.audio else sys.stdin.buffer
 
-  r = sito(args.service, session_id, audio.read())
-  print(session_id, r, file=sys.stdout)
+  ## assume audio has been converted to 16k16bit pcm/wav
+  #audio = open(args.audio, mode = 'rb') if args.audio else sys.stdin.buffer
+  #audio_data = audio.read()
+
+  # use ffmpeg to convert input audio stream to desired format(16k16bit mono wav) on-the-fly
+  audio_data = read_and_convert_audio_data(args.audio if args.audio else '-')
+
+  text = sito(args.service, session_id, audio_data)
+  print(session_id, text, file=sys.stdout)
