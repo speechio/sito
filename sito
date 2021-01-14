@@ -12,8 +12,33 @@ import ffmpeg
 SITO_ROOT = '/Users/jerry/work/git/sito'
 SAFE = os.path.join(SITO_ROOT, '.safe')
 
+
+def speech_recognition_aispeech(session_key, audio_data):
+  import subprocess
+  # with open(os.path.join(SAFE, 'aispeech', 'PRODUCT_ID'), 'r') as f:
+  #   PRODUCT_ID = f.readline().strip()
+
+  # with open(os.path.join(SAFE, 'aispeech', 'API_KEY'), 'r') as f:
+  #   API_KEY= f.readline().strip()
+  
+  # SERVICE_URL = 'https://lasr.duiopen.com/lasr-sentence-api/v2/sentence'
+  # URL=SERVICE_URL + '?' + 'productId=' + PRODUCT_ID + '&' + 'apiKey=' + API_KEY
+  # PARAMS='\'{"request_id":"", "audio": {"audio_type": "wav","sample_rate": 16000,"channel": 1,"sample_bytes": 2}, "asr":{"use_vad":true, "use_itn":true, "use_puctuation":true}}\''
+
+  # cmd='curl -X POST -s -H "Content-Type: multipart/form-data"' + ' -F params=' + PARAMS + ' -F file=@' + audio + ' "' + URL + '"'  # TODO: here audio is filename, modify this to raw binary audio data
+  # r = subprocess.getoutput(cmd)
+  # print(F'key={session_key}', F'service=AISPEECH', r)
+
+  # text = ''
+  # if r:
+  #   for sentence in json.loads(r)['data']['result']:
+  #     text += sentence['onebest']
+  return ''
+
+
 def speech_recognition_aliyun(session_key, audio_data):
   # DOC: https://help.aliyun.com/document_detail/72153.html
+  # INSTALL: pip3 install aliyun-python-sdk-core==2.13.3
   import http.client
   from aliyunsdkcore.client import AcsClient
   from aliyunsdkcore.request import CommonRequest
@@ -74,6 +99,7 @@ def speech_recognition_aliyun(session_key, audio_data):
 
 def speech_recognition_baidu(session_key, audio_data):
   # DOC: https://github.com/Baidu-AIP/speech-demo/rest-api-asr/python/asr_raw.py
+  # INSTALL: no extra dependency
   from urllib.request import urlopen
   from urllib.request import Request
   from urllib.error import URLError
@@ -137,6 +163,7 @@ def speech_recognition_baidu(session_key, audio_data):
 def speech_recognition_google(session_key, audio_data):
   # DOC: https://cloud.google.com/speech-to-text/
   # DEMO: https://github.com/googleapis/python-speech/blob/master/samples/snippets/transcribe.py
+  # INSTALL: pip3 install --upgrade google-cloud-speech
   os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = os.path.join(SAFE, 'google', 'TIOBE.json')
   from google.cloud import speech
 
@@ -149,9 +176,121 @@ def speech_recognition_google(session_key, audio_data):
   r = client.recognize(config=config, audio=speech.RecognitionAudio(content=audio_data))
   return ''.join([r.alternatives[0].transcript for result in r.results])
 
+def speech_recognition_microsoft(session_key, audio_data):
+  # DOC: https://docs.azure.cn/zh-cn/cognitive-services/speech-service/rest-speech-to-text
+  # INSTLL: pip3 install requests
+  import requests
+  LANG='zh-CN'
+  with open(os.path.join(SAFE, 'microsoft', 'SUBSCRIPTION_KEY'), 'r') as f:
+    SUBSCRIPTION_KEY = f.readline().strip()
+
+  url='https://chinaeast2.stt.speech.azure.cn/speech/recognition/conversation/cognitiveservices/v1?language=' + LANG
+
+  headers = {
+      'Accept': 'application/json;text/xml',
+      'Content-Type': 'audio/wav;codecs="audio/pcm";samplerate=16000',
+      'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY,
+      'format': 'detailed'
+  }
+
+  r = requests.post(url, data=audio_data, headers=headers)
+  print(F'key={session_key}', F'service=MICROSOFT', r.text, file=sys.stderr)
+  if r:
+    return json.loads(r.text)['DisplayText']
+  else:
+    return ''
+
+def speech_recognition_sogou(session_key, audio_data):
+  # DOC: https://ai.sogou.com/doc/?url=/docs/content/asr/recognize/
+  # INSTALL: no extra dependency
+  import requests
+  import base64
+  import subprocess
+
+  FORMAT='LINEAR16'
+  SAMPLE_RATE=16000
+  LANG='zh-cmn-Hans-CN'
+
+  with open(os.path.join(SAFE, 'sogou', 'APP_ID'), 'r') as f:
+      APP_ID = f.readline().strip()
+
+  with open(os.path.join(SAFE, 'sogou', 'APP_KEY'), 'r') as f:
+      APP_KEY = f.readline().strip()
+
+  EXPIRE = '60s'
+  REQ=F'{{"appid": "{APP_ID}", "appkey": "{APP_KEY}", "exp": "{EXPIRE}"}}'
+  cmd = F'curl -s -X POST -H "Content-Type: application/json" --data \'{REQ}\' https://api.zhiyin.sogou.com/apis/auth/v1/create_token '
+  #print(cmd, file=sys.stderr)
+  token_string = subprocess.getoutput(cmd)
+  #print(token_string, file=sys.stderr)
+  TOKEN = json.loads(token_string)['token']
+
+  data = {
+      'config': {
+          'encoding': FORMAT,
+          'sample_rate_hertz': SAMPLE_RATE,
+          'language_code': LANG
+      },
+      'audio': {
+          'content': base64.b64encode(audio_data).decode('ascii')
+      }
+  }
+  headers = {
+      'Content-Type': 'application/json',
+      'Appid': APP_ID,
+      'Authorization': 'Bearer ' + TOKEN
+  }
+
+  r = requests.post('https://api.zhiyin.sogou.com/apis/asr/v1/recognize', data=json.dumps(data), headers=headers)
+  print(F'key={session_key}', F'service=SOGOU', r.text)
+  text = ''
+  if r:
+    for sentence in json.loads(r.text)['results']:
+        text += sentence['alternatives'][0]['transcript']
+  return text
+
+
+def speech_recognition_tencent(session_key, audio_data):
+  # DEMO: https://cloud.tencent.com/document/product/1093/35734
+  # INSTALL: pip3 install tencentcloud-sdk-python
+  from tencentcloud.common import credential
+  from tencentcloud.common.profile.client_profile import ClientProfile
+  from tencentcloud.common.profile.http_profile import HttpProfile
+  from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
+  from tencentcloud.asr.v20190614 import asr_client, models
+  import base64
+
+  with open(os.path.join(SAFE, 'tencent', 'SECRET_ID'), 'r') as f:
+      SECRET_ID = f.readline().strip()
+
+  with open(os.path.join(SAFE, 'tencent', 'SECRET_KEY'), 'r') as f:
+      SECRET_KEY = f.readline().strip()
+
+  audio_len = len(audio_data)
+  audio_data_base64 = base64.b64encode(audio_data).decode('utf-8')
+
+  cred = credential.Credential(SECRET_ID, SECRET_KEY)
+  httpProfile = HttpProfile()
+  httpProfile.endpoint = "asr.tencentcloudapi.com"
+  clientProfile = ClientProfile()
+  clientProfile.httpProfile = httpProfile
+  client = asr_client.AsrClient(cred, "ap-shanghai", clientProfile)
+
+  req = models.SentenceRecognitionRequest()
+  params = {"ProjectId":0,"SubServiceType":2,"EngSerViceType":"16k","SourceType":1,"Url":"","VoiceFormat":"wav","UsrAudioKey":"session-123", "Data":audio_data_base64, "DataLen":audio_len}
+  req._deserialize(params)
+
+  r = client.SentenceRecognition(req)
+  print(F'key={session_key}', F'service=TENCENT', r.to_json_string(), file=sys.stderr)
+  if r:
+    return json.loads(r.to_json_string())['Result']
+  else:
+    return ''
+
 
 def speech_recognition_yitu(session_key, audio_data):
   # DOC: https://speech.yitutech.com/devdoc/shortaudio
+  # INSTALL: pip3 install requests
   import hmac, base64, hashlib
   import requests
 
@@ -173,7 +312,6 @@ def speech_recognition_yitu(session_key, audio_data):
 
   # request body
   useCustomWordsIds = [] # hints
-  #body = {'audioBase64': base64.b64encode(audio_data).decode('utf-8'), 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
   audio_data_base64 = base64.b64encode(audio_data).decode('utf-8')
   body = {'audioBase64': audio_data_base64, 'lang': LANG, 'scene': SCENE, 'aue': AUDIO_AUE, 'useCustomWordsIds': useCustomWordsIds}
 
@@ -187,17 +325,22 @@ def speech_recognition_yitu(session_key, audio_data):
   else:
     return ''
 
+
 def sito(service, session_key, audio_data):
   speech_recognition = {
+    'AISPEECH': speech_recognition_aispeech,
     'ALIYUN': speech_recognition_aliyun,
     'BAIDU_PRO': speech_recognition_baidu,
     'GOOGLE': speech_recognition_google,
+    'MICROSOFT': speech_recognition_microsoft,
+    'SOGOU': speech_recognition_sogou,
+    'TENCENT': speech_recognition_tencent,
     'YITU': speech_recognition_yitu,
   }
   return speech_recognition[service](session_key, audio_data)
 
 
-def read_and_convert_audio_data(in_filename, **input_kwargs):
+def read_and_convert_audio(in_filename, **input_kwargs):
   try:
     out, err = (ffmpeg
       .input(in_filename, **input_kwargs)
@@ -210,9 +353,10 @@ def read_and_convert_audio_data(in_filename, **input_kwargs):
     sys.exit(1)
   return out
 
+
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--service', type=str, choices = ['ALIYUN', 'BAIDU_PRO', 'GOOGLE', 'YITU'], default='YITU', help='speech recognition engine.')
+  parser.add_argument('--service', type=str, choices = ['AISPEECH', 'ALIYUN', 'BAIDU_PRO', 'GOOGLE', 'MICROSOFT', 'SOGOU', 'TENCENT', 'YITU'], default='YITU', help='speech recognition engine.')
   parser.add_argument('--id', type=str, default='', help='a user defined string, used as session id, if not specified, uuid.uuid1() will be used.')
   parser.add_argument('--audio', type=str, default='', help='audio file, if not specified, stdin will be used.')
   args = parser.parse_args()
@@ -224,7 +368,7 @@ if __name__ == '__main__':
   #audio_data = audio.read()
 
   # use ffmpeg to convert input audio stream to desired format(16k16bit mono wav) on-the-fly
-  audio_data = read_and_convert_audio_data(args.audio if args.audio else '-')
+  audio_data = read_and_convert_audio(args.audio if args.audio else '-')
 
   text = sito(args.service, session_id, audio_data)
   print(session_id, text, file=sys.stdout)
