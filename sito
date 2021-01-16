@@ -174,7 +174,7 @@ def speech_recognition_google(session_key, audio_data):
   )
   client = speech.SpeechClient()
   r = client.recognize(config=config, audio=speech.RecognitionAudio(content=audio_data))
-  return ''.join([r.alternatives[0].transcript for result in r.results])
+  return ''.join([result.alternatives[0].transcript for result in r.results])
 
 def speech_recognition_microsoft(session_key, audio_data):
   # DOC: https://docs.azure.cn/zh-cn/cognitive-services/speech-service/rest-speech-to-text
