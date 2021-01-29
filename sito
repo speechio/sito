@@ -7,8 +7,16 @@ import uuid
 import argparse
 import json
 import time
+from collections import deque
 import ffmpeg
+import torch
+import torch.nn.functional as F
+import torchaudio
+torch.set_num_threads(1)
 
+FFMPEG_WAV_HEADER_BYTES = 78
+FFMPEG_WAV_SAMPLE_BYTES = 2
+SITO_SAMPLE_RATE = 16000
 SITO_ROOT = '/Users/jerry/work/git/sito'
 SAFE = os.path.join(SITO_ROOT, '.safe')
 
@@ -340,7 +348,7 @@ def sito(service, session_key, audio_data):
   return speech_recognition[service](session_key, audio_data)
 
 
-def read_and_convert_audio(in_filename, **input_kwargs):
+def read_audio_and_convert_to_bytes(in_filename, **input_kwargs):
   try:
     out, err = (ffmpeg
       .input(in_filename, **input_kwargs)
@@ -353,10 +361,80 @@ def read_and_convert_audio(in_filename, **input_kwargs):
     sys.exit(1)
   return out
 
+def read_audio_and_convert_to_tensor(path):
+    wav, sample_rate = torchaudio.load(path)
+
+    if wav.size(0) > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+
+    if sample_rate != SITO_SAMPLE_RATE:
+        transform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=SITO_SAMPLE_RATE)
+        wav = transform(wav)
+        sample_rate = SITO_SAMPLE_RATE
+
+    assert sample_rate == SITO_SAMPLE_RATE
+    return wav.squeeze(0)
+
+def load_jit_vad_model(model_path: str, device=torch.device('cpu')):
+    torch.set_grad_enabled(False)
+    model = torch.jit.load(model_path, map_location=device)
+    model.eval()
+    return model
+
+def vad_model_inference(model, audio_window: torch.Tensor, sample_rate: int = 16000):
+    assert(sample_rate == SITO_SAMPLE_RATE)
+    with torch.no_grad():
+        return model(audio_window)
+
+def get_speech_segments(
+        model,
+        audio_tensor: torch.Tensor,
+        sample_rate: int = 16000,
+        window_size: int = 3200,
+        window_shift: int = 1600,
+        smooth_length: int = 4,
+        sil2speech: float = 0.25,
+        speech2sil: float = 0.07,
+        batch_size: int = 10):
+    X = []
+    Y = []
+    for pos in range(0, len(audio_tensor), window_shift):
+        window = audio_tensor[pos : pos + window_size]
+        if len(window) < window_size:
+            window = F.pad(window, (0, window_size - len(window)))
+        X.append(window.unsqueeze(0))
+        # process full batches & last residual batch
+        if len(X) >= batch_size or (pos + window_shift) > len(audio_tensor):
+            Y.append(vad_model_inference(model, torch.cat(X, dim=0), sample_rate))
+            X = []
+
+    buffer = deque(maxlen=smooth_length)  # maxlen reached => first element dropped
+    triggered = False
+    segments = []
+    b,e = 0,0
+    for k, prob in enumerate(torch.cat(Y, dim=0)[:, 1]):
+        window_center = k*window_shift + 0.5*window_size
+        print(f'{k}, {window_center/sample_rate:.2f}, {prob:.2f}', file=sys.stderr)
+        buffer.append(prob)
+        smoothed_prob = sum(buffer) / len(buffer)
+        if not triggered and smoothed_prob >= sil2speech:
+            triggered = True
+            b = window_shift * max(0, k - smooth_length)
+        elif triggered and smoothed_prob <= speech2sil:
+            e = window_shift * k
+            segments.append((b,e))
+            b,e = 0,0
+            triggered = False
+
+    if b != 0:
+        e = len(audio_tensor)
+        segments.append((b,e))
+    return segments
+
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--service', type=str, choices = ['AISPEECH', 'ALIYUN', 'BAIDU_PRO', 'GOOGLE', 'MICROSOFT', 'SOGOU', 'TENCENT', 'YITU'], default='YITU', help='speech recognition engine.')
+  parser.add_argument('--service', type=str, choices = ['AISPEECH', 'ALIYUN', 'BAIDU_PRO', 'GOOGLE', 'MICROSOFT', 'SOGOU', 'TENCENT', 'YITU'], default='ALIYUN', help='speech recognition engine.')
   parser.add_argument('--id', type=str, default='', help='a user defined string, used as session id, if not specified, uuid.uuid1() will be used.')
   parser.add_argument('--audio', type=str, default='', help='audio file, if not specified, stdin will be used.')
   args = parser.parse_args()
@@ -368,7 +446,20 @@ if __name__ == '__main__':
   #audio_data = audio.read()
 
   # use ffmpeg to convert input audio stream to desired format(16k16bit mono wav) on-the-fly
-  audio_data = read_and_convert_audio(args.audio if args.audio else '-')
+  audio_bytes = read_audio_and_convert_to_bytes(args.audio if args.audio else '-')
 
-  text = sito(args.service, session_id, audio_data)
-  print(session_id, text, file=sys.stdout)
+  # its not ideal to dump audio bytes to tmp file and load it back,
+  # this is because torchaudio's "file-like loading" is not released yet
+  # see https://github.com/pytorch/audio/pull/1158
+  with open('tmp.wav', 'wb') as f:
+    f.write(audio_bytes)
+  audio_tensor = read_audio_and_convert_to_tensor('tmp.wav')
+
+  vad_model = load_jit_vad_model(os.path.join('third_party', 'silero_vad', 'files', 'model.jit'))
+  segments = get_speech_segments(vad_model, audio_tensor, SITO_SAMPLE_RATE, smooth_length=2)
+
+  for k,s in enumerate(segments):
+    b = FFMPEG_WAV_HEADER_BYTES + s[0] * FFMPEG_WAV_SAMPLE_BYTES
+    e = FFMPEG_WAV_HEADER_BYTES + s[1] * FFMPEG_WAV_SAMPLE_BYTES
+    text = sito(args.service, F'{session_id}_{k:04d}', audio_bytes[b:e])
+    print(F"<bos:{s[0]/SITO_SAMPLE_RATE}> {text} <eos:{s[1]/SITO_SAMPLE_RATE}>", file=sys.stdout)
